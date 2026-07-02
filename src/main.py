@@ -51,21 +51,32 @@ class VenvScanner:
         else:
             ctk.CTkLabel(self.disks_container, text="Не найдено доступных дисков").pack()
         
+        # Кнопка "Начать сканирование"
+        self.scan_button = ctk.CTkButton(
+            self.window,
+            text="Начать сканирование",
+            command=self.start_scan,
+            width=200,
+            height=40,
+            font=("Arial", 16)
+        )
+        self.scan_button.pack(pady=20)
+        
         # Информация о версии
         version_label = ctk.CTkLabel(
             self.window,
-            text="Версия 0.1.2",
+            text="Версия 0.1.3",
             font=("Arial", 14)
         )
         version_label.pack(pady=10)
         
         # Сообщение о готовности
-        ready_label = ctk.CTkLabel(
+        self.status_label = ctk.CTkLabel(
             self.window,
             text="Выберите диски для сканирования",
             font=("Arial", 16)
         )
-        ready_label.pack(pady=20)
+        self.status_label.pack(pady=20)
     
     def get_available_disks(self):
         """Получить список доступных локальных дисков (только физические)"""
@@ -76,6 +87,27 @@ class VenvScanner:
                 continue
             disks.append(partition.device)
         return disks
+    
+    def get_selected_disks(self):
+        """Получить список выбранных дисков"""
+        selected = []
+        for disk, var in self.disk_vars:
+            if var.get() == "1":
+                selected.append(disk)
+        return selected
+    
+    def start_scan(self):
+        """Обработчик нажатия кнопки сканирования"""
+        selected = self.get_selected_disks()
+        if not selected:
+            self.status_label.configure(text="⚠️ Не выбрано ни одного диска!")
+            return
+        
+        self.status_label.configure(text=f"🔍 Начинаем сканирование дисков: {', '.join(selected)}")
+        # Здесь будет вызов функции сканирования (заглушка)
+        print(f"Запуск сканирования на дисках: {selected}")
+        # Пока просто выведем в консоль и обновим статус
+        self.status_label.configure(text="✅ Сканирование завершено (заглушка)")
     
     def run(self):
         """Запуск приложения"""
