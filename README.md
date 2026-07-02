@@ -9,3 +9,8 @@ uv venv --python 3.10.9
 .venv\Scripts\activate.bat
 # Для PowerShell:
 .venv\Scripts\Activate.ps1
+# 4. Устанавливаем зависимости
+uv pip install -r requirements.txt
+
+# 5. Запускаем приложение
+python src/main.py
