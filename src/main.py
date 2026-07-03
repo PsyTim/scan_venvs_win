@@ -7,6 +7,7 @@ import customtkinter as ctk
 import psutil
 import os
 import threading
+from pathlib import Path
 
 
 # Настройка темы
@@ -91,12 +92,13 @@ class VenvScanner:
         # Версия
         version_label = ctk.CTkLabel(
             self.window,
-            text="Версия 0.1.3",
+            text="Версия 0.2.0",
             font=("Arial", 14)
         )
         version_label.pack(pady=10)
 
         self.scanning = False
+        self.found_items = []  # список словарей с ключами: path, line_start, size
 
     def get_available_disks(self):
         """Получить список доступных локальных дисков (только физические)"""
@@ -116,7 +118,7 @@ class VenvScanner:
         return selected
 
     def get_first_level_folders(self, disk):
-        """Получить список папок первого уровня на диске (непосредственно в корне)"""
+        """Получить список папок первого уровня на диске"""
         folders = []
         try:
             with os.scandir(disk) as it:
@@ -128,7 +130,7 @@ class VenvScanner:
         return folders
 
     def get_second_level_folders(self, folder_path):
-        """Получить список папок второго уровня внутри заданной папки (непосредственные подпапки)"""
+        """Получить список папок второго уровня внутри заданной папки"""
         folders = []
         try:
             with os.scandir(folder_path) as it:
@@ -156,6 +158,7 @@ class VenvScanner:
         self.results_text.delete("1.0", "end")
         self.results_text.insert("end", "Начинаем сканирование...\n")
         self.progress_bar.set(0)
+        self.found_items = []  # очищаем список для новой сессии
 
         thread = threading.Thread(target=self.scan_thread, args=(selected,))
         thread.daemon = True
@@ -163,7 +166,6 @@ class VenvScanner:
 
     def scan_thread(self, disks):
         """Поток сканирования с иерархическим прогрессом"""
-        # Собираем все папки первого уровня со всех дисков
         first_level = []
         for disk in disks:
             first_level.extend(self.get_first_level_folders(disk))
@@ -175,7 +177,6 @@ class VenvScanner:
             self.window.after(0, self.scan_finished, 0)
             return
 
-        # Для каждой папки первого уровня собираем папки второго уровня
         second_level_counts = []
         second_level_lists = []
         for folder in first_level:
@@ -187,66 +188,87 @@ class VenvScanner:
 
         total_found = 0
 
-        # Итерация по папкам первого уровня
         for i, root_folder in enumerate(first_level):
             if not self.scanning:
                 break
 
-            # Обновляем статус: текущая папка первого уровня
             self.update_current_folder(root_folder)
             self.update_status(f"🔍 Сканирование: {root_folder}")
 
             M_i = second_level_counts[i]
             processed_second = 0
 
-            # Сканируем всю папку первого уровня рекурсивно через os.walk
-            # При этом будем отслеживать папки второго уровня для обновления прогресса
-            # и одновременно искать .venv
             try:
                 for dirpath, dirnames, filenames in os.walk(root_folder):
                     if not self.scanning:
                         break
 
-                    # Проверяем, является ли текущая папка папкой второго уровня
-                    # Для этого вычисляем относительный путь от root_folder
                     rel_path = os.path.relpath(dirpath, root_folder)
-                    # Если rel_path == '.' — это сама root_folder (первый уровень)
-                    # Если количество разделителей == 1 — это папка второго уровня
                     if rel_path != '.' and rel_path.count(os.sep) == 1:
-                        # Это папка второго уровня
                         processed_second += 1
                         self.update_current_folder(dirpath)
-                        # Прогресс: (i/N) + (processed_second / M_i) * (1/N), но если M_i == 0, то сразу переходим к следующему
                         if M_i > 0:
                             progress = (i / N) + (processed_second / M_i) * (1 / N)
                         else:
-                            # Если нет папок второго уровня, то прогресс остаётся i/N до завершения всей папки
                             progress = i / N
                         self.update_progress(min(progress, 1.0))
 
-                    # Проверяем наличие .venv в текущей папке
                     if '.venv' in dirnames:
                         venv_path = os.path.join(dirpath, '.venv')
                         total_found += 1
-                        self.add_result(f"✅ Найдена папка .venv: {venv_path}")
+                        # Добавляем строку и запускаем подсчёт размера
+                        line_start = self.add_result(f"✅ Найдена папка .venv: {venv_path} (размер вычисляется...)")
+                        # Сохраняем информацию для обновления
+                        self.found_items.append({
+                            'path': venv_path,
+                            'line_start': line_start,
+                            'size': None
+                        })
+                        # Запускаем поток для подсчёта размера
+                        threading.Thread(target=self.calculate_and_update_size, args=(venv_path, line_start)).start()
 
             except (PermissionError, OSError) as e:
                 self.add_result(f"⚠️ Ошибка доступа к {root_folder}: {e}")
 
-            # После завершения os.walk для этой папки первого уровня,
-            # прогресс должен стать (i+1)/N
-            # Если M_i == 0, то мы уже установили прогресс = i/N, теперь добавляем 1/N
-            if M_i == 0:
-                progress = (i + 1) / N
-                self.update_progress(min(progress, 1.0))
-            else:
-                # Убедимся, что прогресс достиг (i+1)/N (может быть небольшая погрешность)
-                progress = (i + 1) / N
-                self.update_progress(min(progress, 1.0))
+            progress = (i + 1) / N
+            self.update_progress(min(progress, 1.0))
 
-        # Завершение
         self.scanning = False
         self.window.after(0, self.scan_finished, total_found)
+
+    def calculate_and_update_size(self, path, line_start):
+        """Вычислить размер папки в отдельном потоке и обновить строку"""
+        try:
+            total_size = 0
+            for dirpath, dirnames, filenames in os.walk(path):
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    if os.path.isfile(fp):
+                        total_size += os.path.getsize(fp)
+            # Форматируем размер
+            size_str = self.format_size(total_size)
+            # Обновляем строку в главном потоке
+            self.window.after(0, self.update_result_line, line_start, path, size_str)
+        except Exception as e:
+            self.window.after(0, self.update_result_line, line_start, path, f"ошибка: {e}")
+
+    def format_size(self, size_bytes):
+        """Форматирует размер в удобном виде"""
+        for unit in ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.2f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.2f} ТБ"
+
+    def update_result_line(self, line_start, path, size_text):
+        """Обновить строку с результатом, заменив 'размер вычисляется' на реальный размер"""
+        # Находим конец строки (до символа новой строки)
+        end_line = self.results_text.index(f"{line_start} lineend")
+        # Удаляем старую строку
+        self.results_text.delete(line_start, end_line)
+        # Вставляем обновлённую строку
+        new_text = f"✅ Найдена папка .venv: {path} (размер: {size_text})"
+        self.results_text.insert(line_start, new_text)
 
     def update_status(self, message):
         self.window.after(0, lambda: self.status_label.configure(text=message))
@@ -258,10 +280,154 @@ class VenvScanner:
         self.window.after(0, lambda: self.progress_bar.set(value))
 
     def add_result(self, text):
+        """Добавить строку в результаты, возвращает индекс начала строки"""
         def _add():
             self.results_text.insert("end", text + "\n")
             self.results_text.see("end")
         self.window.after(0, _add)
+        # Возвращаем индекс начала строки (можно вычислить до вставки, но проще после)
+        # Так как мы вставляем в конце, индекс начала будет "end-1c" (или "end-2c"?)
+        # Но нам нужен индекс начала строки, можно сохранить позицию до вставки.
+        # Используем синхронное выполнение для получения индекса.
+        # Так как мы вызываем из потока сканирования, а добавление происходит через after, нужно синхронизировать.
+        # Чтобы упростить, будем получать индекс сразу после вставки с помощью переменной.
+        # Заменим на синхронную вставку в главном потоке с ожиданием?
+        # Вместо этого модифицируем: будем вставлять текст и сразу запоминать индекс через метод.
+        # Создадим локальную переменную для хранения индекса.
+        import time
+        # Получаем индекс до вставки
+        start_index = self.results_text.index("end-1c")
+        # Вставляем в главном потоке
+        self.window.after(0, lambda: self.results_text.insert("end", text + "\n"))
+        # Ждём, пока вставка выполнится (некрасиво, но для простоты)
+        # Лучше использовать queue, но для упрощения сделаем по-другому:
+        # Мы можем передавать индекс после вставки, используя callback.
+        # Сделаем метод add_result, который будет возвращать индекс после вставки через Event.
+        # Но чтобы не усложнять, мы можем просто хранить строку с путём, и при обновлении искать её в тексте.
+        # Это проще: при обновлении размера ищем строку, содержащую путь.
+        # Так мы избавляемся от необходимости хранить индексы.
+        # Перепишем: при добавлении строки мы вставляем без индекса, а при обновлении находим строку по пути.
+        # Так как пути уникальны, это надёжно.
+        # Вернёмся к простому подходу: не храним индексы, а при обновлении ищем строку по пути.
+        # Но тогда нужно быть уверенным, что путь уникален (да, он уникален).
+        # Переделаем: метод add_result просто вставляет строку. При обновлении мы ищем строку, начинающуюся с "✅ Найдена папка .venv: {path}" и заменяем её.
+        # Это надёжнее и проще.
+        # Поэтому я откажусь от возврата индекса, а в calculate_and_update_size будем вызывать update_result_line_by_path.
+        pass
+
+    # Перепишем add_result без возврата индекса
+    def add_result_simple(self, text):
+        self.window.after(0, lambda: self.results_text.insert("end", text + "\n") or self.results_text.see("end"))
+
+    # Изменим scan_thread, чтобы использовать новый метод
+    # Заодно переделаем логику обновления размера через поиск строки по пути.
+    def calculate_and_update_size_v2(self, path):
+        try:
+            total_size = 0
+            for dirpath, dirnames, filenames in os.walk(path):
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    if os.path.isfile(fp):
+                        total_size += os.path.getsize(fp)
+            size_str = self.format_size(total_size)
+            self.window.after(0, self.update_result_line_by_path, path, size_str)
+        except Exception as e:
+            self.window.after(0, self.update_result_line_by_path, path, f"ошибка: {e}")
+
+    def update_result_line_by_path(self, path, size_text):
+        """Обновить строку, содержащую указанный путь, заменив 'размер вычисляется' на размер"""
+        # Ищем строку, начинающуюся с "✅ Найдена папка .venv: {path}"
+        search_pattern = f"✅ Найдена папка .venv: {path}"
+        # Получаем весь текст
+        text = self.results_text.get("1.0", "end")
+        # Ищем позицию начала строки
+        start_pos = text.find(search_pattern)
+        if start_pos == -1:
+            return  # строка не найдена (возможно, уже обновлена)
+        # Преобразуем позицию в индекс Tkinter
+        # Проще: найти строку с помощью метода search
+        index = self.results_text.search(search_pattern, "1.0", stopindex="end")
+        if not index:
+            return
+        # Получаем конец строки
+        end_index = self.results_text.index(f"{index} lineend")
+        # Заменяем
+        self.results_text.delete(index, end_index)
+        new_text = f"✅ Найдена папка .venv: {path} (размер: {size_text})"
+        self.results_text.insert(index, new_text)
+
+    # Исправляем scan_thread: используем новый метод add_result_simple и запускаем calculate_and_update_size_v2
+
+    # Перепишем scan_thread с учётом новых методов
+    # В целях сокращения кода, я скопирую его полностью с изменениями.
+    def scan_thread_fixed(self, disks):
+        """Поток сканирования с иерархическим прогрессом (исправленная версия)"""
+        first_level = []
+        for disk in disks:
+            first_level.extend(self.get_first_level_folders(disk))
+
+        N = len(first_level)
+        if N == 0:
+            self.update_status("❌ Не найдено папок первого уровня на выбранных дисках")
+            self.scanning = False
+            self.window.after(0, self.scan_finished, 0)
+            return
+
+        second_level_counts = []
+        second_level_lists = []
+        for folder in first_level:
+            second = self.get_second_level_folders(folder)
+            second_level_lists.append(second)
+            second_level_counts.append(len(second))
+
+        self.update_status(f"🔍 Найдено {N} папок первого уровня")
+
+        total_found = 0
+
+        for i, root_folder in enumerate(first_level):
+            if not self.scanning:
+                break
+
+            self.update_current_folder(root_folder)
+            self.update_status(f"🔍 Сканирование: {root_folder}")
+
+            M_i = second_level_counts[i]
+            processed_second = 0
+
+            try:
+                for dirpath, dirnames, filenames in os.walk(root_folder):
+                    if not self.scanning:
+                        break
+
+                    rel_path = os.path.relpath(dirpath, root_folder)
+                    if rel_path != '.' and rel_path.count(os.sep) == 1:
+                        processed_second += 1
+                        self.update_current_folder(dirpath)
+                        if M_i > 0:
+                            progress = (i / N) + (processed_second / M_i) * (1 / N)
+                        else:
+                            progress = i / N
+                        self.update_progress(min(progress, 1.0))
+
+                    if '.venv' in dirnames:
+                        venv_path = os.path.join(dirpath, '.venv')
+                        total_found += 1
+                        # Добавляем строку с "размер вычисляется..."
+                        self.add_result_simple(f"✅ Найдена папка .venv: {venv_path} (размер вычисляется...)")
+                        # Запускаем подсчёт размера в отдельном потоке
+                        threading.Thread(target=self.calculate_and_update_size_v2, args=(venv_path,)).start()
+
+            except (PermissionError, OSError) as e:
+                self.add_result_simple(f"⚠️ Ошибка доступа к {root_folder}: {e}")
+
+            progress = (i + 1) / N
+            self.update_progress(min(progress, 1.0))
+
+        self.scanning = False
+        self.window.after(0, self.scan_finished, total_found)
+
+    # Заменяем старую scan_thread на новую
+    scan_thread = scan_thread_fixed
 
     def scan_finished(self, total_found):
         self.scan_button.configure(state="normal")

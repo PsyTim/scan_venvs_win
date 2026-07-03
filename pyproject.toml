@@ -1,7 +1,7 @@
 
 [project]
 name = "scan-venvs-win"
-version = "0.1.4"
+version = "0.2.0"
 description = "GUI tool to find and clean up Python venv folders on Windows local drives"
 readme = "README.md"
 requires-python = ">=3.10.9"
