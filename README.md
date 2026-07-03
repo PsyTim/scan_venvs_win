@@ -14,3 +14,10 @@ uv pip install -r requirements.txt
 
 # 5. Запускаем приложение
 python src/main.py
+
+# 6. Запуск тестов
+uv pip install -r requirements-dev.txt
+uv run pytest tests/
+
+# Для проверки покрытия кода тестами:
+uv run pytest --cov=src tests/
